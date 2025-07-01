@@ -1,193 +1,183 @@
 package com.example.docprocessor.service
 
-import com.example.docprocessor.dto.AadhaarOcrFields
-import com.example.docprocessor.dto.DrivingLicenseOcrFields
-import com.example.docprocessor.dto.FastApiResponse
+import com.example.docprocessor.dto.DocumentProcessingResult
+import com.example.docprocessor.dto.OcrResponse
 import com.example.docprocessor.model.*
-import com.example.docprocessor.repository.PanDataRepository
-import com.example.docprocessor.repository.DocumentLogRepository
-import com.example.docprocessor.repository.PassportDataRepository
-import com.fasterxml.jackson.databind.ObjectMapper
+import com.example.docprocessor.repository.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.IO
+// --- IMPORT FIXES ---
+import org.apache.pdfbox.Loader // ADD THIS LINE for the new way to load PDFs
+import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.rendering.PDFRenderer
 import org.slf4j.LoggerFactory
+import org.springframework.http.MediaType
+import org.springframework.http.client.MultipartBodyBuilder
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.multipart.MultipartFile
+import org.springframework.web.reactive.function.BodyInserters
+import org.springframework.web.reactive.function.client.WebClient
+import org.springframework.web.reactive.function.client.awaitBody
+import java.awt.image.BufferedImage
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 import java.time.LocalDate
-import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-import java.time.format.DateTimeParseException
+import java.util.*
+import javax.imageio.ImageIO
 
 @Service
 class DocumentProcessingService(
-    private val fileStorageService: FileStorageService,
-    private val pdfConversionService: PdfConversionService,
-    private val ocrClientService: OcrClientService,
+    private val ocrWebClient: WebClient,
     private val panDataRepository: PanDataRepository,
+    private val voterIdDataRepository: VoterIdDataRepository,
     private val passportDataRepository: PassportDataRepository,
-    private val documentLogRepository: DocumentLogRepository,
-    private val objectMapper: ObjectMapper // For converting Map to DTO
+    private val documentLogRepository: DocumentLogRepository
 ) {
     private val logger = LoggerFactory.getLogger(DocumentProcessingService::class.java)
-    private val dateFormatter = DateTimeFormatter.ofPattern("dd/MM/yyyy")
-    private val yearFormatter = DateTimeFormatter.ofPattern("yyyy")
+    private val fileStorageLocation: Path = Paths.get("./storage").toAbsolutePath().normalize()
+    private val tempFileLocation: Path = Paths.get("./temp").toAbsolutePath().normalize()
+    private val dateFormatter = DateTimeFormatter.ofPattern("dd-MM-yyyy")
 
+    init {
+        try {
+            Files.createDirectories(fileStorageLocation)
+            Files.createDirectories(tempFileLocation)
+        } catch (ex: Exception) {
+            throw RuntimeException("Could not create storage/temp directories.", ex)
+        }
+    }
 
     @Transactional
-    fun processUploadedDocument(multipartFile: MultipartFile, username: String): Any {
-        val (originalStoredFile, uniqueFilename) = fileStorageService.storeFile(multipartFile)
-        var fileToProcess: File = originalStoredFile
-        var isPdfConverted = false
-
-        if (multipartFile.contentType == "application/pdf" || originalStoredFile.extension.equals("pdf", ignoreCase = true)) {
-            logger.info("PDF file detected: ${originalStoredFile.name}. Converting to image.")
-            // Ensure output directory exists for converted images, could be same as uploadDir or a sub-directory
-            val conversionOutputDir = originalStoredFile.parentFile
-            fileToProcess = pdfConversionService.convertPdfToImage(originalStoredFile, conversionOutputDir)
-            isPdfConverted = true
-            logger.info("PDF converted to image: ${fileToProcess.name}")
-        }
-
-        val fastApiResponse: FastApiResponse
+    suspend fun processUploadedDocument(multipartFile: MultipartFile, username: String): DocumentProcessingResult {
+        var fileToProcess: File? = null
         try {
-            fastApiResponse = ocrClientService.callFastApiProcessDocument(fileToProcess).block()
-                ?: throw RuntimeException("Failed to get response from OCR service")
-        } catch (e: Exception) {
-            logger.error("Error calling OCR service: ${e.message}", e)
-            logDocument(username, uniqueFilename, DocumentType.UNKNOWN, DocumentStatus.FAILED_OCR)
-            // Clean up converted image if it was created from PDF and OCR failed
-            if (isPdfConverted && fileToProcess.exists()) {
-                fileToProcess.delete()
+            fileToProcess = prepareFileForOcr(multipartFile)
+            val ocrResponse = callOcrMicroservice(fileToProcess)
+
+            if (ocrResponse.status != "SUCCESS") {
+                logDocument(DocumentType.UNKNOWN, multipartFile.originalFilename!!, username, DocumentStatus.FAILED_OCR)
+                throw IllegalStateException("OCR processing failed: ${ocrResponse.errorMessage}")
             }
-            throw RuntimeException("OCR service call failed: ${e.message}", e)
-        }
 
+            val docType = DocumentType.valueOf(ocrResponse.documentType)
+            val savedPath = storeOriginalFile(multipartFile, docType)
+            val savedEntityId = saveData(ocrResponse, savedPath.toString(), username)
+            logDocument(docType, multipartFile.originalFilename!!, username, DocumentStatus.VERIFIED)
 
-        val storedFilePath = uniqueFilename // Path relative to uploadDir for DB
-
-        val result = when (fastApiResponse.documentType) {
-            "Aadhar" -> {
-                if (fastApiResponse.ocr.fields is Map<*, *>) {
-                    try {
-                        @Suppress("UNCHECKED_CAST")
-                        val fieldsMap = fastApiResponse.ocr.fields as Map<String, Any?>
-                        val aadhaarFields = objectMapper.convertValue(fieldsMap, AadhaarOcrFields::class.java)
-
-                        val dobStr = aadhaarFields.dateOfBirthYear ?: throw IllegalArgumentException("Date of birth missing for Aadhaar")
-                        val dob = parseAadhaarDate(dobStr)
-
-                        val pancardData = PancardData(
-                            aadhaarNumber = aadhaarFields.aadharNumber?.replace(" ", "") ?: throw IllegalArgumentException("Aadhaar number missing"),
-                            name = aadhaarFields.name ?: throw IllegalArgumentException("Name missing for Aadhaar"),
-                            dob = dob,
-                            gender = aadhaarFields.gender ?: throw IllegalArgumentException("Gender missing for Aadhaar"),
-                            maskedImagePath = storedFilePath,
-                            uploadedBy = username,
-                            uploadedAt = LocalDateTime.now()
-                        )
-                        val saved = panDataRepository.save(pancardData)
-                        logDocument(username, uniqueFilename, DocumentType.AADHAAR, DocumentStatus.UPLOADED)
-                        logger.info("Aadhaar data saved for user $username: ${saved.id}")
-                        saved
-                    } catch (e: Exception) {
-                        logger.error("Error processing Aadhaar data: ${e.message} for fields: ${fastApiResponse.ocr.fields}", e)
-                        logDocument(username, uniqueFilename, DocumentType.AADHAAR, DocumentStatus.REJECTED, "Error: ${e.message}")
-                        throw RuntimeException("Invalid Aadhaar data from OCR: ${e.message}", e)
-                    }
-                } else {
-                    logDocument(username, uniqueFilename, DocumentType.AADHAAR, DocumentStatus.FAILED_OCR, "OCR fields not a map")
-                    throw RuntimeException("OCR fields for Aadhaar are not in expected format.")
-                }
-            }
-            "Driver's License" -> {
-                if (fastApiResponse.ocr.fields is Map<*, *>) {
-                    try {
-                        @Suppress("UNCHECKED_CAST")
-                        val fieldsMap = fastApiResponse.ocr.fields as Map<String, Any?>
-                        val dlFields = objectMapper.convertValue(fieldsMap, DrivingLicenseOcrFields::class.java)
-
-                        val expiryDate = dlFields.expiryDate?.let { LocalDate.parse(it, dateFormatter) }
-                            ?: throw IllegalArgumentException("Expiry date missing for Driving License")
-
-                        val passportData = PassportData(
-                            licenseNumber = dlFields.licenseNumber ?: throw IllegalArgumentException("License number missing"),
-                            name = dlFields.name ?: throw IllegalArgumentException("Name missing for Driving License"),
-                            expiryDate = expiryDate,
-                            imagePath = storedFilePath,
-                            uploadedBy = username,
-                            uploadedAt = LocalDateTime.now()
-                        )
-                        val saved = passportDataRepository.save(passportData)
-                        logDocument(username, uniqueFilename, DocumentType.DRIVING_LICENSE, DocumentStatus.UPLOADED)
-                        logger.info("Driving License data saved for user $username: ${saved.id}")
-                        saved
-                    } catch (e: Exception) {
-                        logger.error("Error processing Driving License data: ${e.message} for fields: ${fastApiResponse.ocr.fields}", e)
-                        logDocument(username, uniqueFilename, DocumentType.DRIVING_LICENSE, DocumentStatus.REJECTED, "Error: ${e.message}")
-                        throw RuntimeException("Invalid Driving License data from OCR: ${e.message}", e)
-                    }
-                } else {
-                    logDocument(username, uniqueFilename, DocumentType.DRIVING_LICENSE, DocumentStatus.FAILED_OCR, "OCR fields not a map")
-                    throw RuntimeException("OCR fields for Driving License are not in expected format.")
-                }
-            }
-            "Unknown" -> {
-                val message = if (fastApiResponse.ocr.fields is String) fastApiResponse.ocr.fields as String else "Unknown document type with non-string fields."
-                logger.warn("Unknown document type received from FastAPI: $message for file $uniqueFilename by user $username")
-                logDocument(username, uniqueFilename, DocumentType.UNKNOWN, DocumentStatus.REJECTED, message)
-                mapOf("message" to "Unknown document type processed", "details" to message)
-            }
-            else -> {
-                logger.warn("Unrecognized document type from FastAPI: ${fastApiResponse.documentType} for file $uniqueFilename by user $username")
-                logDocument(username, uniqueFilename, DocumentType.UNKNOWN, DocumentStatus.FAILED_OCR, "Unrecognized type: ${fastApiResponse.documentType}")
-                mapOf("message" to "Unrecognized document type: ${fastApiResponse.documentType}")
-            }
-        }
-
-        // Clean up the converted image file if it was created from PDF
-        if (isPdfConverted && fileToProcess.exists() && fileToProcess.path != originalStoredFile.path) {
-            val deleted = fileToProcess.delete()
-            if(deleted) logger.info("Cleaned up converted image: ${fileToProcess.name}")
-            else logger.warn("Failed to clean up converted image: ${fileToProcess.name}")
-        }
-        return result
-    }
-
-    private fun parseAadhaarDate(dateStr: String): LocalDate {
-        return try {
-            LocalDate.parse(dateStr, dateFormatter) // "dd/MM/yyyy"
-        } catch (e: DateTimeParseException) {
-            try {
-                // If it's just a year, e.g., "2004", we can't create a full LocalDate.
-                // The table expects a full date. The example "27/09/2004" for "date_of_birth-year" suggests it should be full date.
-                // If it were truly just year, this would need adjustment (e.g., store year as int or make day/month optional).
-                // For now, strongly assume "dd/MM/yyyy" for "date_of_birth-year" based on example value.
-                // If it can ALSO be just "yyyy", then this logic needs to be more robust.
-                // As per example: "date_of_birth-year": "27/09/2004", this should parse with dateFormatter
-                throw IllegalArgumentException("Aadhaar date format '$dateStr' is not 'dd/MM/yyyy'.")
-            } catch (e2: DateTimeParseException) {
-                throw IllegalArgumentException("Invalid date format for Aadhaar DOB: $dateStr. Expected dd/MM/yyyy.")
-            }
+            return DocumentProcessingResult(
+                documentId = savedEntityId,
+                documentType = ocrResponse.documentType,
+                message = "Document processed and saved successfully."
+            )
+        } finally {
+            fileToProcess?.delete()
         }
     }
 
+    private suspend fun callOcrMicroservice(file: File): OcrResponse {
+        val bodyBuilder = MultipartBodyBuilder()
+        bodyBuilder.part("file", file.readBytes(), MediaType.APPLICATION_OCTET_STREAM)
+            .filename(file.name)
 
-    private fun logDocument(username: String, fileName: String, docType: DocumentType, status: DocumentStatus, details: String? = null) {
-        val finalFileName = Paths.get(fileName).fileName.toString() // Get just the file name part
-        var logMessage = "Document: $finalFileName, Type: $docType, Status: $status, Uploader: $username"
-        if(details != null) {
-            logMessage += ", Details: $details"
+        logger.info("Sending file '${file.name}' to OCR microservice...")
+        return ocrWebClient.post()
+            .uri("/ocr/process")
+            .contentType(MediaType.MULTIPART_FORM_DATA)
+            .body(BodyInserters.fromMultipartData(bodyBuilder.build()))
+            .retrieve()
+            .awaitBody<OcrResponse>()
+    }
+
+    private suspend fun prepareFileForOcr(multipartFile: MultipartFile): File {
+        val extension = multipartFile.originalFilename?.substringAfterLast('.', "")
+        val tempFile = withContext(Dispatchers.IO) {
+            Files.createTempFile(tempFileLocation, "upload-", ".$extension").toFile()
         }
-        logger.info(logMessage)
+        multipartFile.inputStream.use { input ->
+            Files.copy(input, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
 
-        val documentLog = DocumentLog(
-            uploader = username,
-            fileName = finalFileName, // Store only the filename part
-            docType = docType,
-            status = status,
-            createdAt = LocalDateTime.now()
+        if (multipartFile.contentType == "application/pdf" || extension.equals("pdf", true)) {
+            logger.info("PDF detected. Converting to PNG for OCR.")
+            return convertPdfToImage(tempFile)
+        }
+        return tempFile
+    }
+
+    private suspend fun convertPdfToImage(pdfFile: File): File = withContext(Dispatchers.IO) {
+        val pngFile = Files.createTempFile(tempFileLocation, "converted-", ".png").toFile()
+        // *** THE FIX IS HERE ***
+        Loader.loadPDF(pdfFile).use { document ->
+            val renderer = PDFRenderer(document)
+            val image: BufferedImage = renderer.renderImageWithDPI(0, 300f)
+            ImageIO.write(image, "PNG", pngFile)
+        }
+        pdfFile.delete()
+        pngFile
+    }
+
+    private fun saveData(ocrResponse: OcrResponse, imagePath: String, username: String): Long {
+        val data = ocrResponse.data
+        val docType = DocumentType.valueOf(ocrResponse.documentType)
+
+        return when (docType) {
+            DocumentType.PAN_CARD -> panDataRepository.save(
+                PanData(
+                    name = data["name"] ?: throw IllegalArgumentException("Name is missing for PAN"),
+                    dob = LocalDate.parse(data["dob"], dateFormatter),
+                    panNumber = data["pan_number"] ?: throw IllegalArgumentException("PAN number is missing"),
+                    imagePath = imagePath,
+                    uploadedBy = username
+                )
+            ).id!!
+
+            DocumentType.VOTER_ID -> voterIdDataRepository.save(
+                VoterIdData(
+                    name = data["name"] ?: throw IllegalArgumentException("Name is missing for Voter ID"),
+                    dob = LocalDate.parse(data["dob"], dateFormatter),
+                    voterIdNumber = data["voter_id_number"] ?: throw IllegalArgumentException("Voter ID number is missing"),
+                    imagePath = imagePath,
+                    uploadedBy = username
+                )
+            ).id!!
+
+            DocumentType.PASSPORT -> passportDataRepository.save(
+                PassportData(
+                    name = data["name"] ?: throw IllegalArgumentException("Name is missing for Passport"),
+                    dob = LocalDate.parse(data["dob"], dateFormatter),
+                    passportNumber = data["passport_number"] ?: throw IllegalArgumentException("Passport number is missing"),
+                    imagePath = imagePath,
+                    uploadedBy = username
+                )
+            ).id!!
+
+            DocumentType.UNKNOWN -> throw IllegalArgumentException("Cannot save data for UNKNOWN document type.")
+        }
+    }
+
+    private fun storeOriginalFile(file: MultipartFile, docType: DocumentType): Path {
+        val docTypePath = fileStorageLocation.resolve(docType.name)
+        Files.createDirectories(docTypePath)
+        val uniqueFileName = "${System.currentTimeMillis()}_${UUID.randomUUID()}_${file.originalFilename}"
+        val targetLocation = docTypePath.resolve(uniqueFileName)
+        file.inputStream.use { input -> Files.copy(input, targetLocation, StandardCopyOption.REPLACE_EXISTING) }
+        return targetLocation
+    }
+
+    private fun logDocument(docType: DocumentType, fileName: String, uploader: String, status: DocumentStatus) {
+        documentLogRepository.save(
+            DocumentLog(
+                docType = docType,
+                fileName = Paths.get(fileName).fileName.toString(),
+                uploader = uploader,
+                status = status
+            )
         )
-        documentLogRepository.save(documentLog)
     }
 }
