@@ -12,17 +12,6 @@ import com.fasterxml.jackson.annotation.JsonProperty
  * @param status The status of the OCR operation ("SUCCESS" or "FAILURE").
  * @param errorMessage An optional message describing the error if the status is "FAILURE".
  */
-
-data class FastApiResponse(
-    @JsonProperty("document_type")
-    val documentType: String,
-    val ocr: OcrDataContainer
-)
-
-data class OcrDataContainer(
-    val fields: Any // Can be Map<String, String> or String for "Unknown"
-)
-
 data class OcrResponse(
     @JsonProperty("document_type")
     val documentType: String,
@@ -38,9 +27,8 @@ data class OcrResponse(
 )
 
 /**
- * Represents the final, structured response sent from our Spring Boot API
- * back to the original client (e.g., a web or mobile front-end) after a
- * successful document upload and processing.
+ * Represents the final, structured response sent from our Spring Boot API back to the client
+ * after a successful document upload and processing.
  *
  * @param documentId The unique ID of the saved document record in the database.
  * @param documentType The classified type of the document.

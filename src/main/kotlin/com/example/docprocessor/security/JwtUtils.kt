@@ -1,15 +1,15 @@
 package com.example.docprocessor.security
 
+import com.example.docprocessor.security.UserDetailsImpl // <-- ADD THIS IMPORT
 import io.jsonwebtoken.*
 import io.jsonwebtoken.security.Keys
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.security.core.Authentication
-import org.springframework.security.core.GrantedAuthority
+// No longer need: import org.springframework.security.core.userdetails.User
 import org.springframework.stereotype.Component
 import java.util.Date
 import javax.crypto.SecretKey
-
 
 @Component
 class JwtUtils {
@@ -26,17 +26,22 @@ class JwtUtils {
     }
 
     fun generateJwtToken(authentication: Authentication): String {
-        val userPrincipal = authentication.principal as org.springframework.security.core.userdetails.User
+        // --- THE FIX IS HERE ---
+        // Cast to your custom UserDetailsImpl, not Spring's default User class.
+        val userPrincipal = authentication.principal as UserDetailsImpl
+
         val roles = userPrincipal.authorities.map { it.authority }.toList()
 
         return Jwts.builder()
             .setSubject(userPrincipal.username)
-            .claim("roles", roles)
+            .claim("roles", roles) // This is good practice and remains unchanged.
             .setIssuedAt(Date())
             .setExpiration(Date(Date().time + jwtExpirationMs))
             .signWith(key, SignatureAlgorithm.HS512)
             .compact()
     }
+
+    // This function does not need changes as it's not part of the login flow's error.
     fun generateJwtTokenForUser(username: String, roles: List<String>): String {
         return Jwts.builder()
             .setSubject(username)
@@ -46,7 +51,6 @@ class JwtUtils {
             .signWith(key, SignatureAlgorithm.HS512)
             .compact()
     }
-
 
     fun getUserNameFromJwtToken(token: String): String {
         return Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(token).body.subject

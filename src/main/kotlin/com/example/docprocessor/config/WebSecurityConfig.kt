@@ -1,11 +1,9 @@
 package com.example.docprocessor.config
 
-import com.example.docprocessor.model.UserRole
 import com.example.docprocessor.security.AuthTokenFilter
 import com.example.docprocessor.security.UserDetailsServiceImpl
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import org.springframework.http.HttpMethod
 import org.springframework.security.authentication.AuthenticationManager
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider
 import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration
@@ -18,7 +16,7 @@ import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 
 @Configuration
-@EnableMethodSecurity(prePostEnabled = true) // For @PreAuthorize
+@EnableMethodSecurity(prePostEnabled = true) // Crucial for @PreAuthorize to work
 class WebSecurityConfig(private val userDetailsService: UserDetailsServiceImpl) {
 
     @Bean
@@ -46,12 +44,19 @@ class WebSecurityConfig(private val userDetailsService: UserDetailsServiceImpl) 
 
     @Bean
     fun filterChain(http: HttpSecurity): SecurityFilterChain {
-        http.csrf { it.disable() }
+        http
+            // 1. Disable CSRF for stateless REST APIs
+            .csrf { it.disable() }
+            // 2. Set session management to stateless
             .sessionManagement { session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            // 3. Define authorization rules
             .authorizeHttpRequests { auth ->
-                auth.requestMatchers("/api/auth/**").permitAll()
-                    .requestMatchers("/api/documents/**").hasAnyRole(UserRole.USER.name, UserRole.ADMIN.name)
-                    .requestMatchers("/api/logs/**").hasRole(UserRole.ADMIN.name)
+                auth
+                    // Publicly accessible endpoints
+                    .requestMatchers("/api/auth/**").permitAll()
+                    .requestMatchers("/v3/api-docs/**", "/swagger-ui/**").permitAll()
+                    // Any other request must be authenticated.
+                    // The specific role checks will be handled by @PreAuthorize in controllers.
                     .anyRequest().authenticated()
             }
 

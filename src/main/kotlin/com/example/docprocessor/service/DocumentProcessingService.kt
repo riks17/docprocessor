@@ -7,9 +7,7 @@ import com.example.docprocessor.repository.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.IO
-// --- IMPORT FIXES ---
-import org.apache.pdfbox.Loader // ADD THIS LINE for the new way to load PDFs
-import org.apache.pdfbox.pdmodel.PDDocument
+import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.slf4j.LoggerFactory
 import org.springframework.http.MediaType
@@ -57,7 +55,10 @@ class DocumentProcessingService(
     suspend fun processUploadedDocument(multipartFile: MultipartFile, username: String): DocumentProcessingResult {
         var fileToProcess: File? = null
         try {
+            // 1. Prepare file for OCR (convert PDF to image if necessary) in a temp location
             fileToProcess = prepareFileForOcr(multipartFile)
+
+            // 2. Call Python OCR Microservice asynchronously
             val ocrResponse = callOcrMicroservice(fileToProcess)
 
             if (ocrResponse.status != "SUCCESS") {
@@ -66,8 +67,14 @@ class DocumentProcessingService(
             }
 
             val docType = DocumentType.valueOf(ocrResponse.documentType)
+
+            // 3. Store the original file permanently in the final storage location
             val savedPath = storeOriginalFile(multipartFile, docType)
+
+            // 4. Save the extracted data to the correct database table
             val savedEntityId = saveData(ocrResponse, savedPath.toString(), username)
+
+            // 5. Log the successful transaction
             logDocument(docType, multipartFile.originalFilename!!, username, DocumentStatus.VERIFIED)
 
             return DocumentProcessingResult(
@@ -76,18 +83,18 @@ class DocumentProcessingService(
                 message = "Document processed and saved successfully."
             )
         } finally {
+            // 6. Clean up temporary files
             fileToProcess?.delete()
         }
     }
 
     private suspend fun callOcrMicroservice(file: File): OcrResponse {
         val bodyBuilder = MultipartBodyBuilder()
-        bodyBuilder.part("file", file.readBytes(), MediaType.APPLICATION_OCTET_STREAM)
-            .filename(file.name)
+        bodyBuilder.part("file", file.readBytes(), MediaType.APPLICATION_OCTET_STREAM).filename(file.name)
 
-        logger.info("Sending file '${file.name}' to OCR microservice...")
+        logger.info("Sending file '${file.name}' to OCR microservice at /ocr/process")
         return ocrWebClient.post()
-            .uri("/ocr/process")
+            .uri("/ocr/process") // The endpoint on your Python service
             .contentType(MediaType.MULTIPART_FORM_DATA)
             .body(BodyInserters.fromMultipartData(bodyBuilder.build()))
             .retrieve()
@@ -99,9 +106,7 @@ class DocumentProcessingService(
         val tempFile = withContext(Dispatchers.IO) {
             Files.createTempFile(tempFileLocation, "upload-", ".$extension").toFile()
         }
-        multipartFile.inputStream.use { input ->
-            Files.copy(input, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        }
+        multipartFile.inputStream.use { input -> Files.copy(input, tempFile.toPath(), StandardCopyOption.REPLACE_EXISTING) }
 
         if (multipartFile.contentType == "application/pdf" || extension.equals("pdf", true)) {
             logger.info("PDF detected. Converting to PNG for OCR.")
@@ -112,13 +117,12 @@ class DocumentProcessingService(
 
     private suspend fun convertPdfToImage(pdfFile: File): File = withContext(Dispatchers.IO) {
         val pngFile = Files.createTempFile(tempFileLocation, "converted-", ".png").toFile()
-        // *** THE FIX IS HERE ***
         Loader.loadPDF(pdfFile).use { document ->
             val renderer = PDFRenderer(document)
             val image: BufferedImage = renderer.renderImageWithDPI(0, 300f)
             ImageIO.write(image, "PNG", pngFile)
         }
-        pdfFile.delete()
+        pdfFile.delete() // Delete the temporary PDF, keep the PNG
         pngFile
     }
 
@@ -136,7 +140,6 @@ class DocumentProcessingService(
                     uploadedBy = username
                 )
             ).id!!
-
             DocumentType.VOTER_ID -> voterIdDataRepository.save(
                 VoterIdData(
                     name = data["name"] ?: throw IllegalArgumentException("Name is missing for Voter ID"),
@@ -146,7 +149,6 @@ class DocumentProcessingService(
                     uploadedBy = username
                 )
             ).id!!
-
             DocumentType.PASSPORT -> passportDataRepository.save(
                 PassportData(
                     name = data["name"] ?: throw IllegalArgumentException("Name is missing for Passport"),
@@ -156,7 +158,6 @@ class DocumentProcessingService(
                     uploadedBy = username
                 )
             ).id!!
-
             DocumentType.UNKNOWN -> throw IllegalArgumentException("Cannot save data for UNKNOWN document type.")
         }
     }
@@ -180,4 +181,9 @@ class DocumentProcessingService(
             )
         )
     }
+
+    // --- Methods to support the controller's GET endpoints ---
+    fun getPanDataById(id: Long): PanData? = panDataRepository.findById(id).orElse(null)
+    fun getVoterIdDataById(id: Long): VoterIdData? = voterIdDataRepository.findById(id).orElse(null)
+    fun getPassportDataById(id: Long): PassportData? = passportDataRepository.findById(id).orElse(null)
 }
