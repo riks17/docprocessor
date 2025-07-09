@@ -9,7 +9,6 @@ import org.springframework.web.reactive.function.client.WebClient
 
 @Configuration
 class WebClientConfig(
-    // This reads the URL from your application.properties file
     @Value("\${ocr.service.url}") private val ocrServiceUrl: String
 ) {
 
@@ -17,7 +16,7 @@ class WebClientConfig(
     fun ocrWebClient(): WebClient {
         return WebClient.builder()
             .baseUrl(ocrServiceUrl)
-            .defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+            .defaultHeader(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
             .build()
     }
 }

@@ -1,64 +1,46 @@
 package com.example.docprocessor.security
 
-import com.example.docprocessor.security.UserDetailsImpl // <-- ADD THIS IMPORT
 import io.jsonwebtoken.*
+import io.jsonwebtoken.io.Decoders
 import io.jsonwebtoken.security.Keys
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.security.core.Authentication
-// No longer need: import org.springframework.security.core.userdetails.User
+import org.springframework.security.core.userdetails.UserDetails
 import org.springframework.stereotype.Component
-import java.util.Date
+import java.util.*
 import javax.crypto.SecretKey
 
 @Component
-class JwtUtils {
+class JwtUtils(
+    @Value("\${jwt.secret}") private val jwtSecret: String,
+    @Value("\${jwt.expirationMs}") private val jwtExpirationMs: Int
+) {
     private val logger = LoggerFactory.getLogger(JwtUtils::class.java)
 
-    @Value("\${jwt.secret}")
-    private lateinit var jwtSecret: String
-
-    @Value("\${jwt.expirationMs}")
-    private var jwtExpirationMs: Int = 0
-
-    private val key: SecretKey by lazy {
-        Keys.hmacShaKeyFor(jwtSecret.toByteArray())
+    private fun getSigningKey(): SecretKey {
+        val keyBytes = Decoders.BASE64.decode(jwtSecret)
+        return Keys.hmacShaKeyFor(keyBytes)
     }
 
     fun generateJwtToken(authentication: Authentication): String {
-        // --- THE FIX IS HERE ---
-        // Cast to your custom UserDetailsImpl, not Spring's default User class.
-        val userPrincipal = authentication.principal as UserDetailsImpl
-
-        val roles = userPrincipal.authorities.map { it.authority }.toList()
+        val userPrincipal = authentication.principal as UserDetails
 
         return Jwts.builder()
             .setSubject(userPrincipal.username)
-            .claim("roles", roles) // This is good practice and remains unchanged.
             .setIssuedAt(Date())
             .setExpiration(Date(Date().time + jwtExpirationMs))
-            .signWith(key, SignatureAlgorithm.HS512)
-            .compact()
-    }
-
-    // This function does not need changes as it's not part of the login flow's error.
-    fun generateJwtTokenForUser(username: String, roles: List<String>): String {
-        return Jwts.builder()
-            .setSubject(username)
-            .claim("roles", roles.map { "ROLE_$it"}) // Ensure ROLE_ prefix if not already there
-            .setIssuedAt(Date())
-            .setExpiration(Date(Date().time + jwtExpirationMs))
-            .signWith(key, SignatureAlgorithm.HS512)
+            .signWith(getSigningKey(), SignatureAlgorithm.HS512)
             .compact()
     }
 
     fun getUserNameFromJwtToken(token: String): String {
-        return Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(token).body.subject
+        return Jwts.parserBuilder().setSigningKey(getSigningKey()).build().parseClaimsJws(token).body.subject
     }
 
     fun validateJwtToken(authToken: String): Boolean {
         try {
-            Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(authToken)
+            Jwts.parserBuilder().setSigningKey(getSigningKey()).build().parseClaimsJws(authToken)
             return true
         } catch (e: MalformedJwtException) {
             logger.error("Invalid JWT token: {}", e.message)

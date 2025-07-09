@@ -1,7 +1,7 @@
 package com.example.docprocessor.service
 
 import com.example.docprocessor.dto.DocumentProcessingResult
-import com.example.docprocessor.dto.OcrResponse
+import com.example.docprocessor.dto.PythonOcrResponse
 import com.example.docprocessor.model.*
 import com.example.docprocessor.repository.*
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +26,7 @@ import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
+import java.time.format.DateTimeParseException
 import java.util.*
 import javax.imageio.ImageIO
 
@@ -40,7 +41,7 @@ class DocumentProcessingService(
     private val logger = LoggerFactory.getLogger(DocumentProcessingService::class.java)
     private val fileStorageLocation: Path = Paths.get("./storage").toAbsolutePath().normalize()
     private val tempFileLocation: Path = Paths.get("./temp").toAbsolutePath().normalize()
-    private val dateFormatter = DateTimeFormatter.ofPattern("dd-MM-yyyy")
+    private val dateFormatter = DateTimeFormatter.ofPattern("dd/MM/yyyy")
 
     init {
         try {
@@ -52,54 +53,117 @@ class DocumentProcessingService(
     }
 
     @Transactional
-    suspend fun processUploadedDocument(multipartFile: MultipartFile, username: String): DocumentProcessingResult {
+    suspend fun processUploadedDocument(multipartFile: MultipartFile, username: String): Any {
         var fileToProcess: File? = null
         try {
-            // 1. Prepare file for OCR (convert PDF to image if necessary) in a temp location
             fileToProcess = prepareFileForOcr(multipartFile)
+            val pythonResponse = callOcrMicroservice(fileToProcess)
 
-            // 2. Call Python OCR Microservice asynchronously
-            val ocrResponse = callOcrMicroservice(fileToProcess)
+            val ocrResult = pythonResponse.results.firstOrNull()
+                ?: throw IllegalStateException("OCR service returned an empty result list.")
 
-            if (ocrResponse.status != "SUCCESS") {
+            if (ocrResult.ocrResults == null || ocrResult.message != null || ocrResult.error != null) {
+                val errorMessage = ocrResult.message ?: ocrResult.error ?: "Unknown error from OCR service"
                 logDocument(DocumentType.UNKNOWN, multipartFile.originalFilename!!, username, DocumentStatus.FAILED_OCR)
-                throw IllegalStateException("OCR processing failed: ${ocrResponse.errorMessage}")
+                throw IllegalStateException("OCR processing failed: $errorMessage")
             }
 
-            val docType = DocumentType.valueOf(ocrResponse.documentType)
+            val docType = mapPythonDocTypeToEnum(ocrResult.documentType)
+            if (docType == DocumentType.UNKNOWN) {
+                logDocument(docType, multipartFile.originalFilename!!, username, DocumentStatus.REJECTED)
+                throw IllegalArgumentException("Unsupported or unknown document type received: ${ocrResult.documentType}")
+            }
 
-            // 3. Store the original file permanently in the final storage location
             val savedPath = storeOriginalFile(multipartFile, docType)
-
-            // 4. Save the extracted data to the correct database table
-            val savedEntityId = saveData(ocrResponse, savedPath.toString(), username)
-
-            // 5. Log the successful transaction
+            // Save data robustly
+            saveData(docType, ocrResult.ocrResults, savedPath.toString(), username)
             logDocument(docType, multipartFile.originalFilename!!, username, DocumentStatus.VERIFIED)
 
-            return DocumentProcessingResult(
-                documentId = savedEntityId,
-                documentType = ocrResponse.documentType,
-                message = "Document processed and saved successfully."
-            )
+            // Return the raw OCR results as the response
+            return ocrResult.ocrResults
         } finally {
-            // 6. Clean up temporary files
             fileToProcess?.delete()
         }
     }
 
-    private suspend fun callOcrMicroservice(file: File): OcrResponse {
+    private suspend fun callOcrMicroservice(file: File): PythonOcrResponse {
         val bodyBuilder = MultipartBodyBuilder()
-        bodyBuilder.part("file", file.readBytes(), MediaType.APPLICATION_OCTET_STREAM).filename(file.name)
+        bodyBuilder.part("files", file.readBytes(), MediaType.APPLICATION_OCTET_STREAM)
+            .header("Content-Disposition", "form-data; name=\"files\"; filename=\"${file.name}\"")
 
-        logger.info("Sending file '${file.name}' to OCR microservice at /ocr/process")
+        logger.info("Sending file '${file.name}' to OCR microservice at /ocr/process/")
         return ocrWebClient.post()
-            .uri("/ocr/process") // The endpoint on your Python service
+            .uri("/ocr/process/")
             .contentType(MediaType.MULTIPART_FORM_DATA)
             .body(BodyInserters.fromMultipartData(bodyBuilder.build()))
             .retrieve()
-            .awaitBody<OcrResponse>()
+            .awaitBody<PythonOcrResponse>()
     }
+
+    // --- ROBUST saveData FUNCTION ---
+    // This version will not crash. If a field is missing or a date is invalid, it logs a warning
+    // and proceeds to save the entity with a default or null value.
+    private fun saveData(docType: DocumentType, data: Map<String, String>, imagePath: String, username: String) {
+        when (docType) {
+            DocumentType.PAN_CARD -> {
+                val dob = try {
+                    LocalDate.parse(data["dob"], dateFormatter)
+                } catch (e: Exception) {
+                    logger.warn("Could not parse PAN DOB '${data["dob"]}'. Defaulting to epoch.")
+                    LocalDate.EPOCH // Use a default value
+                }
+                panDataRepository.save(
+                    PanData(
+                        name = data["name"] ?: "N/A",
+                        dob = dob,
+                        panNumber = data["pan"] ?: "N/A",
+                        imagePath = imagePath,
+                        uploadedBy = username
+                    )
+                )
+            }
+            DocumentType.VOTER_ID -> {
+                val dob = try {
+                    LocalDate.parse(data["date"], dateFormatter)
+                } catch (e: Exception) {
+                    logger.warn("Could not parse Voter ID DOB '${data["date"]}'. Defaulting to epoch.")
+                    LocalDate.EPOCH
+                }
+                voterIdDataRepository.save(
+                    VoterIdData(
+                        name = data["name"] ?: "N/A",
+                        dob = dob,
+                        voterIdNumber = data["voter_id"] ?: "N/A",
+                        imagePath = imagePath,
+                        uploadedBy = username
+                    )
+                )
+            }
+            DocumentType.PASSPORT -> {
+                val dob = try {
+                    LocalDate.parse(data["dob"], dateFormatter)
+                } catch (e: Exception) {
+                    logger.warn("Could not parse Passport DOB '${data["dob"]}'. Defaulting to epoch.")
+                    LocalDate.EPOCH
+                }
+                passportDataRepository.save(
+                    PassportData(
+                        name = data["name"] ?: "N/A",
+                        dob = dob,
+                        passportNumber = data["passport_number"] ?: "N/A",
+                        imagePath = imagePath,
+                        uploadedBy = username
+                    )
+                )
+            }
+            DocumentType.UNKNOWN -> {
+                logger.warn("Attempted to save data for an UNKNOWN document type. Skipping.")
+            }
+        }
+    }
+
+
+    // --- Other helper functions remain the same ---
 
     private suspend fun prepareFileForOcr(multipartFile: MultipartFile): File {
         val extension = multipartFile.originalFilename?.substringAfterLast('.', "")
@@ -122,44 +186,8 @@ class DocumentProcessingService(
             val image: BufferedImage = renderer.renderImageWithDPI(0, 300f)
             ImageIO.write(image, "PNG", pngFile)
         }
-        pdfFile.delete() // Delete the temporary PDF, keep the PNG
+        pdfFile.delete()
         pngFile
-    }
-
-    private fun saveData(ocrResponse: OcrResponse, imagePath: String, username: String): Long {
-        val data = ocrResponse.data
-        val docType = DocumentType.valueOf(ocrResponse.documentType)
-
-        return when (docType) {
-            DocumentType.PAN_CARD -> panDataRepository.save(
-                PanData(
-                    name = data["name"] ?: throw IllegalArgumentException("Name is missing for PAN"),
-                    dob = LocalDate.parse(data["dob"], dateFormatter),
-                    panNumber = data["pan_number"] ?: throw IllegalArgumentException("PAN number is missing"),
-                    imagePath = imagePath,
-                    uploadedBy = username
-                )
-            ).id!!
-            DocumentType.VOTER_ID -> voterIdDataRepository.save(
-                VoterIdData(
-                    name = data["name"] ?: throw IllegalArgumentException("Name is missing for Voter ID"),
-                    dob = LocalDate.parse(data["dob"], dateFormatter),
-                    voterIdNumber = data["voter_id_number"] ?: throw IllegalArgumentException("Voter ID number is missing"),
-                    imagePath = imagePath,
-                    uploadedBy = username
-                )
-            ).id!!
-            DocumentType.PASSPORT -> passportDataRepository.save(
-                PassportData(
-                    name = data["name"] ?: throw IllegalArgumentException("Name is missing for Passport"),
-                    dob = LocalDate.parse(data["dob"], dateFormatter),
-                    passportNumber = data["passport_number"] ?: throw IllegalArgumentException("Passport number is missing"),
-                    imagePath = imagePath,
-                    uploadedBy = username
-                )
-            ).id!!
-            DocumentType.UNKNOWN -> throw IllegalArgumentException("Cannot save data for UNKNOWN document type.")
-        }
     }
 
     private fun storeOriginalFile(file: MultipartFile, docType: DocumentType): Path {
@@ -182,7 +210,15 @@ class DocumentProcessingService(
         )
     }
 
-    // --- Methods to support the controller's GET endpoints ---
+    private fun mapPythonDocTypeToEnum(pythonDocType: String): DocumentType {
+        return when (pythonDocType.lowercase()) {
+            "pan" -> DocumentType.PAN_CARD
+            "passport" -> DocumentType.PASSPORT
+            "voterid_new", "voterid_old" -> DocumentType.VOTER_ID
+            else -> DocumentType.UNKNOWN
+        }
+    }
+
     fun getPanDataById(id: Long): PanData? = panDataRepository.findById(id).orElse(null)
     fun getVoterIdDataById(id: Long): VoterIdData? = voterIdDataRepository.findById(id).orElse(null)
     fun getPassportDataById(id: Long): PassportData? = passportDataRepository.findById(id).orElse(null)

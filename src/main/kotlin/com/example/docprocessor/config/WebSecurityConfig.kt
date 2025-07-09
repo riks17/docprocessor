@@ -16,13 +16,15 @@ import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 
 @Configuration
-@EnableMethodSecurity(prePostEnabled = true) // Crucial for @PreAuthorize to work
-class WebSecurityConfig(private val userDetailsService: UserDetailsServiceImpl) {
+@EnableMethodSecurity(prePostEnabled = true)
+// Inject the AuthTokenFilter directly into the constructor
+class WebSecurityConfig(
+    private val userDetailsService: UserDetailsServiceImpl,
+    private val authTokenFilter: AuthTokenFilter // <-- INJECT THE FILTER
+) {
 
-    @Bean
-    fun authenticationJwtTokenFilter(): AuthTokenFilter {
-        return AuthTokenFilter()
-    }
+    // NO LONGER NEEDED: The @Bean for authenticationJwtTokenFilter is removed.
+    // Spring creates it automatically because it's now a @Component.
 
     @Bean
     fun passwordEncoder(): PasswordEncoder {
@@ -45,23 +47,18 @@ class WebSecurityConfig(private val userDetailsService: UserDetailsServiceImpl) 
     @Bean
     fun filterChain(http: HttpSecurity): SecurityFilterChain {
         http
-            // 1. Disable CSRF for stateless REST APIs
             .csrf { it.disable() }
-            // 2. Set session management to stateless
             .sessionManagement { session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
-            // 3. Define authorization rules
             .authorizeHttpRequests { auth ->
                 auth
-                    // Publicly accessible endpoints
                     .requestMatchers("/api/auth/**").permitAll()
                     .requestMatchers("/v3/api-docs/**", "/swagger-ui/**").permitAll()
-                    // Any other request must be authenticated.
-                    // The specific role checks will be handled by @PreAuthorize in controllers.
                     .anyRequest().authenticated()
             }
 
         http.authenticationProvider(authenticationProvider())
-        http.addFilterBefore(authenticationJwtTokenFilter(), UsernamePasswordAuthenticationFilter::class.java)
+        // Use the injected authTokenFilter instance
+        http.addFilterBefore(authTokenFilter, UsernamePasswordAuthenticationFilter::class.java)
 
         return http.build()
     }
