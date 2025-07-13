@@ -1,14 +1,10 @@
 package com.example.docprocessor.api
 
-import com.example.docprocessor.dto.JwtResponse
-import com.example.docprocessor.dto.LoginRequest
-import com.example.docprocessor.dto.MessageResponse
-import com.example.docprocessor.dto.SignupRequest
+import com.example.docprocessor.dto.*
 import com.example.docprocessor.model.User
-import com.example.docprocessor.model.UserRole
 import com.example.docprocessor.repository.UserRepository
 import com.example.docprocessor.security.JwtUtils
-import com.example.docprocessor.security.UserDetailsImpl // The correct class is imported
+import com.example.docprocessor.security.UserDetailsImpl
 import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
 import org.springframework.security.authentication.AuthenticationManager
@@ -27,6 +23,7 @@ class AuthController(
     private val jwtUtils: JwtUtils
 ) {
 
+    // Login endpoint remains unchanged.
     @PostMapping("/login")
     fun authenticateUser(@Valid @RequestBody loginRequest: LoginRequest): ResponseEntity<JwtResponse> {
         val authentication = authenticationManager.authenticate(
@@ -36,35 +33,37 @@ class AuthController(
         SecurityContextHolder.getContext().authentication = authentication
         val jwt = jwtUtils.generateJwtToken(authentication)
 
-        // --- THIS IS THE FIX ---
-        // Cast to your custom UserDetails implementation, NOT the service.
         val userDetails = authentication.principal as UserDetailsImpl
-
-        val roles = userDetails.getAuthorities().map { it.authority }
+        val roles = userDetails.authorities.map { it.authority }
 
         return ResponseEntity.ok(
             JwtResponse(
                 token = jwt,
-                id = userDetails.getId(), // This will now resolve correctly
+                id = userDetails.getId(),
                 username = userDetails.username,
-                roles = roles
+                roles = userDetails.
             )
         )
     }
 
+    /**
+     * Unified, public signup endpoint that directly assigns the provided role.
+     * WARNING: DEVELOPMENT ONLY.
+     */
     @PostMapping("/signup")
     fun registerUser(@Valid @RequestBody signupRequest: SignupRequest): ResponseEntity<*> {
-        if (userRepository.existsByUsername(signupRequest.username)) {
+        if (userRepository.findByUsername(signupRequest.username).isPresent) {
             return ResponseEntity.badRequest().body(MessageResponse("Error: Username is already taken!"))
         }
 
+        // --- DIRECT ASSIGNMENT - NO IF/ELSE ---
         val user = User(
             username = signupRequest.username,
             password = passwordEncoder.encode(signupRequest.password),
-            role = UserRole.USER
+            role = signupRequest.role // The role is taken directly from the request.
         )
         userRepository.save(user)
 
-        return ResponseEntity.ok(MessageResponse("User registered successfully!"))
+        return ResponseEntity.ok(MessageResponse("User registered successfully with role: ${user.role.name}"))
     }
 }
