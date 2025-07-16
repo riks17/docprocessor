@@ -20,7 +20,7 @@ class DocumentController(
     private val logger = LoggerFactory.getLogger(DocumentController::class.java)
 
     @PostMapping("/upload")
-    @PreAuthorize("hasAnyRole('USER', 'ADMIN')")
+    @PreAuthorize("hasAnyRole('USER', 'ADMIN', 'SUPERADMIN')")
     fun uploadAndProcessDocument(
         @RequestParam("file") file: MultipartFile,
         @AuthenticationPrincipal userDetails: UserDetails
@@ -41,7 +41,7 @@ class DocumentController(
     }
 
     @GetMapping("/pan/{id}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
     fun getPanDataById(@PathVariable id: Long): ResponseEntity<*> {
         val panData = documentProcessingService.getPanDataById(id)
         return if (panData != null) {
@@ -53,7 +53,7 @@ class DocumentController(
     }
 
     @GetMapping("/voter-id/{id}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
     fun getVoterIdDataById(@PathVariable id: Long): ResponseEntity<*> {
         val voterIdData = documentProcessingService.getVoterIdDataById(id)
         return if (voterIdData != null) {
@@ -65,7 +65,7 @@ class DocumentController(
     }
 
     @GetMapping("/passport/{id}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
     fun getPassportDataById(@PathVariable id: Long): ResponseEntity<*> {
         // This is the line from your screenshot, it will now work.
         val passportData = documentProcessingService.getPassportDataById(id)

@@ -1,10 +1,15 @@
 package com.example.docprocessor.model
 
 import jakarta.persistence.*
-import jakarta.validation.constraints.NotBlank
 
-enum class UserRole {
-    USER, ADMIN
+/**
+ * The single, authoritative source for user roles in the application.
+ * These are the clean names that will be stored in the database.
+ */
+enum class Role {
+    USER,
+    ADMIN,
+    SUPERADMIN
 }
 
 @Entity
@@ -15,14 +20,12 @@ data class User(
     val id: Long? = null,
 
     @Column(unique = true, nullable = false)
-    @NotBlank
     var username: String,
 
     @Column(nullable = false)
-    @NotBlank
-    var password: String, // Store hashed password
+    var password: String,
 
-    @Enumerated(EnumType.STRING)
+    @Enumerated(EnumType.STRING) // This will now store "USER", "ADMIN", etc.
     @Column(nullable = false)
-    var role: UserRole
+    var role: Role
 )

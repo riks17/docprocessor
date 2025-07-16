@@ -1,12 +1,15 @@
 package com.example.docprocessor.api
 
 import com.example.docprocessor.dto.*
+import com.example.docprocessor.model.Role
 import com.example.docprocessor.model.User
 import com.example.docprocessor.repository.UserRepository
 import com.example.docprocessor.security.JwtUtils
 import com.example.docprocessor.security.UserDetailsImpl
+import com.example.docprocessor.service.UserService
 import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
+import org.springframework.security.access.prepost.PreAuthorize
 import org.springframework.security.authentication.AuthenticationManager
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken
 import org.springframework.security.core.context.SecurityContextHolder
@@ -20,50 +23,52 @@ class AuthController(
     private val authenticationManager: AuthenticationManager,
     private val userRepository: UserRepository,
     private val passwordEncoder: PasswordEncoder,
-    private val jwtUtils: JwtUtils
+    private val jwtUtils: JwtUtils,
+    private val userService: UserService
 ) {
 
-    // Login endpoint remains unchanged.
+    // ... (login method is fine) ...
     @PostMapping("/login")
-    fun authenticateUser(@Valid @RequestBody loginRequest: LoginRequest): ResponseEntity<JwtResponse> {
+    fun authenticateUser(@Valid @RequestBody loginRequest: LoginRequest): ResponseEntity<*> {
         val authentication = authenticationManager.authenticate(
             UsernamePasswordAuthenticationToken(loginRequest.username, loginRequest.password)
         )
-
         SecurityContextHolder.getContext().authentication = authentication
         val jwt = jwtUtils.generateJwtToken(authentication)
-
         val userDetails = authentication.principal as UserDetailsImpl
         val roles = userDetails.authorities.map { it.authority }
 
         return ResponseEntity.ok(
-            JwtResponse(
-                token = jwt,
-                id = userDetails.getId(),
-                username = userDetails.username,
-                roles = userDetails.
-            )
+            JwtResponse(token = jwt, id = userDetails.getId(), username = userDetails.username, roles = roles)
         )
     }
 
-    /**
-     * Unified, public signup endpoint that directly assigns the provided role.
-     * WARNING: DEVELOPMENT ONLY.
-     */
+
     @PostMapping("/signup")
     fun registerUser(@Valid @RequestBody signupRequest: SignupRequest): ResponseEntity<*> {
-        if (userRepository.findByUsername(signupRequest.username).isPresent) {
+        // --- THE FIX ---
+        // Instead of .isPresent, we use the repository's existsBy... method, which is cleaner.
+        if (userRepository.existsByUsername(signupRequest.username)) {
             return ResponseEntity.badRequest().body(MessageResponse("Error: Username is already taken!"))
         }
 
-        // --- DIRECT ASSIGNMENT - NO IF/ELSE ---
         val user = User(
             username = signupRequest.username,
             password = passwordEncoder.encode(signupRequest.password),
-            role = signupRequest.role // The role is taken directly from the request.
+            role = Role.USER
         )
         userRepository.save(user)
+        return ResponseEntity.ok(MessageResponse("User registered successfully!"))
+    }
 
-        return ResponseEntity.ok(MessageResponse("User registered successfully with role: ${user.role.name}"))
+    @PostMapping("/create-user")
+    @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
+    fun createPrivilegedUser(@Valid @RequestBody request: PrivilegedUserCreateRequest): ResponseEntity<*> {
+        try {
+            val user = userService.createUserWithRole(request)
+            return ResponseEntity.ok(MessageResponse("User '${user.username}' created with role ${user.role}"))
+        } catch (e: IllegalArgumentException) {
+            return ResponseEntity.badRequest().body(MessageResponse(e.message ?: "An unknown error occurred."))
+        }
     }
 }
