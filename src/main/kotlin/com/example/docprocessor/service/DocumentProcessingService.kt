@@ -48,7 +48,6 @@ class DocumentProcessingService(
             throw RuntimeException("Could not create storage/temp directories.", ex)
         }
     }
-
     // --- The main processUploadedDocument method is unchanged ---
     @Transactional
     fun processUploadedDocument(multipartFile: MultipartFile, username: String): Any {
