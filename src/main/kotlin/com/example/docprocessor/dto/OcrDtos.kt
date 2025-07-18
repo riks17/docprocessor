@@ -1,6 +1,7 @@
 package com.example.docprocessor.dto
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import org.springframework.web.multipart.MultipartFile
 
 /**
  * DTO that exactly matches the root JSON object from the Python FastAPI service.
@@ -33,5 +34,3 @@ data class DocumentProcessingResult(
     val documentType: String,
     val message: String
 )
-
-// Add these DTOs for the AuthController

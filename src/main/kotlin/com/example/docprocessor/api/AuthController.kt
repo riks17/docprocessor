@@ -62,7 +62,7 @@ class AuthController(
     }
 
     @PostMapping("/create-user")
-    @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
+    @PreAuthorize("hasAnyRole('SUPERADMIN')")
     fun createPrivilegedUser(@Valid @RequestBody request: PrivilegedUserCreateRequest): ResponseEntity<*> {
         try {
             val user = userService.createUserWithRole(request)

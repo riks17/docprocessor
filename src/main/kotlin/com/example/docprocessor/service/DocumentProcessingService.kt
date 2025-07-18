@@ -1,21 +1,17 @@
 package com.example.docprocessor.service
 
-import com.example.docprocessor.dto.PythonOcrResponse
 import com.example.docprocessor.model.*
 import com.example.docprocessor.repository.*
+import com.example.docprocessor.service.client.OcrServiceClient // Import the new Feign client
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.slf4j.LoggerFactory
-import org.springframework.http.MediaType
-import org.springframework.http.client.MultipartBodyBuilder
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.multipart.MultipartFile
-import org.springframework.web.reactive.function.BodyInserters
-import org.springframework.web.reactive.function.client.WebClient
-import org.springframework.web.reactive.function.client.WebClientResponseException
 import java.awt.image.BufferedImage
 import java.io.File
+import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -28,7 +24,8 @@ import javax.imageio.ImageIO
 
 @Service
 class DocumentProcessingService(
-    private val ocrWebClient: WebClient,
+    // The WebClient is replaced by the declarative Feign Client
+    private val ocrServiceClient: OcrServiceClient,
     private val panDataRepository: PanDataRepository,
     private val voterIdDataRepository: VoterIdDataRepository,
     private val passportDataRepository: PassportDataRepository,
@@ -49,7 +46,6 @@ class DocumentProcessingService(
         }
     }
 
-    // --- The main processUploadedDocument method is unchanged ---
     @Transactional
     fun processUploadedDocument(multipartFile: MultipartFile, username: String): Any {
         var tempStagedFile: File? = null
@@ -59,7 +55,7 @@ class DocumentProcessingService(
         try {
             val (stagedFile, uniqueFilename) = storeFileToTemp(multipartFile)
             tempStagedFile = stagedFile
-            var fileToProcess = tempStagedFile
+            var fileToProcess: File = tempStagedFile
 
             if (isPdf(multipartFile, tempStagedFile)) {
                 logger.info("PDF file detected: ${tempStagedFile.name}. Converting to image.")
@@ -67,7 +63,11 @@ class DocumentProcessingService(
                 fileToProcess = convertedImageFile
             }
 
-            val pythonResponse = callOcrService(fileToProcess)
+            // --- REFACTORED PART: Using the Feign Client ---
+            // The verbose WebClient logic is replaced by a simple, clean method call.
+            val multipartFileAdapter = FileToMultipartFileAdapter(fileToProcess)
+            val pythonResponse = ocrServiceClient.processDocument(multipartFileAdapter)
+
             val ocrResult = pythonResponse.results.firstOrNull()
                 ?: throw IllegalStateException("OCR service returned an empty result list.")
 
@@ -103,49 +103,19 @@ class DocumentProcessingService(
         }
     }
 
-
-    // --- THE `saveData` METHOD IS NOW UPDATED WITH THE NEW LOGIC ---
     private fun saveData(docType: DocumentType, fields: Map<String, String>, path: String, user: String, timestamp: LocalDateTime): Any {
         return when (docType) {
             DocumentType.PAN_CARD -> {
-                // Only the PAN number is required. The rest are optional.
                 val panNumber = fields["pan"] ?: throw IllegalArgumentException("PAN number is required and was not extracted.")
-                panDataRepository.save(PanData(
-                    name = fields["name"],
-                    fathersName = fields["father"],
-                    dob = fields["dob"]?.let { parseDate(it, "PAN") },
-                    panNumber = panNumber,
-                    imagePath = path,
-                    uploadedBy = user,
-                    uploadedAt = timestamp
-                ))
+                panDataRepository.save(PanData(name = fields["name"], fathersName = fields["father"], dob = fields["dob"]?.let { parseDate(it, "PAN") }, panNumber = panNumber, imagePath = path, uploadedBy = user, uploadedAt = timestamp))
             }
             DocumentType.VOTER_ID -> {
-                // Only the Voter ID number is required. The rest are optional.
                 val voterIdNumber = fields["voter_id"] ?: throw IllegalArgumentException("Voter ID number is required and was not extracted.")
-                voterIdDataRepository.save(VoterIdData(
-                    name = fields["name"],
-                    gender = fields["gender"],
-                    dob = fields["date"]?.let { parseDate(it, "Voter ID") },
-                    voterIdNumber = voterIdNumber,
-                    imagePath = path,
-                    uploadedBy = user,
-                    uploadedAt = timestamp
-                ))
+                voterIdDataRepository.save(VoterIdData(name = fields["name"], gender = fields["gender"], dob = fields["date"]?.let { parseDate(it, "Voter ID") }, voterIdNumber = voterIdNumber, imagePath = path, uploadedBy = user, uploadedAt = timestamp))
             }
             DocumentType.PASSPORT -> {
-                // Only the Passport number is required. The rest are optional.
                 val passportNumber = fields["passport_number"] ?: throw IllegalArgumentException("Passport number is required and was not extracted.")
-                passportDataRepository.save(PassportData(
-                    name = fields["name"],
-                    gender = fields["gender"],
-                    dob = fields["dob"]?.let { parseDate(it, "Passport DOB") },
-                    passportNumber = passportNumber,
-                    expiryDate = fields["expiry"]?.let { parseDate(it, "Passport Expiry Date") },
-                    imagePath = path,
-                    uploadedBy = user,
-                    uploadedAt = timestamp
-                ))
+                passportDataRepository.save(PassportData(name = fields["name"], gender = fields["gender"], dob = fields["dob"]?.let { parseDate(it, "Passport DOB") }, passportNumber = passportNumber, expiryDate = fields["expiry"]?.let { parseDate(it, "Passport Expiry Date") }, imagePath = path, uploadedBy = user, uploadedAt = timestamp))
             }
             DocumentType.UNKNOWN -> throw IllegalStateException("Should not attempt to save UNKNOWN document type.")
         }
@@ -182,30 +152,10 @@ class DocumentProcessingService(
         return pngFile
     }
 
-    private fun callOcrService(file: File): PythonOcrResponse {
-        val bodyBuilder = MultipartBodyBuilder()
-        bodyBuilder.part("files", file.readBytes(), MediaType.APPLICATION_OCTET_STREAM)
-            .header("Content-Disposition", "form-data; name=\"files\"; filename=\"${file.name}\"")
-        logger.info("Sending file '${file.name}' to OCR microservice at /ocr/process/")
-        try {
-            return ocrWebClient.post()
-                .uri("/ocr/process/")
-                .contentType(MediaType.MULTIPART_FORM_DATA)
-                .body(BodyInserters.fromMultipartData(bodyBuilder.build()))
-                .retrieve()
-                .bodyToMono(PythonOcrResponse::class.java)
-                .block() ?: throw IllegalStateException("OCR service returned an empty response body.")
-        } catch (e: WebClientResponseException) {
-            logger.error("Error from OCR service: ${e.statusCode} ${e.getResponseBodyAsString()}", e)
-            throw IllegalStateException("Failed to call OCR service: ${e.message}")
-        }
-    }
-
     private fun isPdf(multipartFile: MultipartFile, file: File): Boolean =
         "application/pdf".equals(multipartFile.contentType, ignoreCase = true) || "pdf".equals(file.extension, ignoreCase = true)
 
     private fun parseDate(dateStr: String, docTypeName: String): LocalDate {
-        // Removed the null check as we now use ?.let to call this function safely
         try {
             return LocalDate.parse(dateStr, dateFormatter)
         } catch (e: Exception) {
@@ -230,4 +180,18 @@ class DocumentProcessingService(
             "voterid_new", "voterid_old" -> DocumentType.VOTER_ID
             else -> DocumentType.UNKNOWN
         }
+
+    // --- Private Helper Class to adapt a File to a MultipartFile ---
+    private class FileToMultipartFileAdapter(private val file: File) : MultipartFile {
+        override fun getName(): String = "files"
+        override fun getOriginalFilename(): String = file.name
+        override fun getContentType(): String? = Files.probeContentType(file.toPath())
+        override fun isEmpty(): Boolean = file.length() == 0L
+        override fun getSize(): Long = file.length()
+        override fun getBytes(): ByteArray = file.readBytes()
+        override fun getInputStream(): InputStream = file.inputStream()
+        override fun transferTo(dest: File) {
+            file.copyTo(dest, overwrite = true)
+        }
+    }
 }
