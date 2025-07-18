@@ -52,7 +52,6 @@ class WebSecurityConfig(
             .authorizeHttpRequests { auth ->
                 auth
                     .requestMatchers("/api/auth/**").permitAll()
-                    // ✅ ADDED: Allow public access to Swagger UI and its API docs
                     .requestMatchers(
                         "/v3/api-docs/**",
                         "/swagger-ui/**",

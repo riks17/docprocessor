@@ -3,8 +3,11 @@ package com.example.docprocessor.api
 import com.example.docprocessor.service.DocumentProcessingService
 import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.security.SecurityRequirement
+import io.swagger.v3.oas.annotations.Operation
+import io.swagger.v3.oas.annotations.security.SecurityRequirement
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpStatus
+import org.springframework.http.MediaType
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
 import org.springframework.security.access.prepost.PreAuthorize
@@ -22,11 +25,15 @@ class DocumentController(
     private val logger = LoggerFactory.getLogger(DocumentController::class.java)
 
     @PostMapping("/upload", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
+    @PostMapping("/upload", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
     @PreAuthorize("hasAnyRole('USER', 'ADMIN', 'SUPERADMIN')")
+    @Operation(summary = "Upload and process a single document")
+    @SecurityRequirement(name = "bearerAuth")
     @Operation(summary = "Upload and process a single document")
     @SecurityRequirement(name = "bearerAuth")
     fun uploadAndProcessDocument(
         // ✅ CORRECTED: Using @RequestPart for single file upload.
+        @RequestPart("file") file: MultipartFile,
         @RequestPart("file") file: MultipartFile,
         @AuthenticationPrincipal userDetails: UserDetails
     ): ResponseEntity<*> {
@@ -103,7 +110,6 @@ class DocumentController(
     }
 
 
-    // --- The rest of your GET methods are unchanged ---
     @GetMapping("/pan/{id}")
     @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
     @Operation(summary = "Get PAN card data by ID", security = [SecurityRequirement(name = "bearerAuth")])
