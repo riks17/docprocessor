@@ -16,20 +16,14 @@ import org.springframework.security.web.SecurityFilterChain
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter
 
 @Configuration
-@EnableMethodSecurity(prePostEnabled = true)
-// Inject the AuthTokenFilter directly into the constructor
+@EnableMethodSecurity // This enables the @PreAuthorize annotations on controller methods
 class WebSecurityConfig(
     private val userDetailsService: UserDetailsServiceImpl,
-    private val authTokenFilter: AuthTokenFilter // <-- INJECT THE FILTER
+    private val authTokenFilter: AuthTokenFilter
 ) {
 
-    // NO LONGER NEEDED: The @Bean for authenticationJwtTokenFilter is removed.
-    // Spring creates it automatically because it's now a @Component.
-
     @Bean
-    fun passwordEncoder(): PasswordEncoder {
-        return BCryptPasswordEncoder()
-    }
+    fun passwordEncoder(): PasswordEncoder = BCryptPasswordEncoder()
 
     @Bean
     fun authenticationProvider(): DaoAuthenticationProvider {
@@ -40,28 +34,27 @@ class WebSecurityConfig(
     }
 
     @Bean
-    fun authenticationManager(authConfig: AuthenticationConfiguration): AuthenticationManager {
-        return authConfig.authenticationManager
-    }
+    fun authenticationManager(authConfig: AuthenticationConfiguration): AuthenticationManager =
+        authConfig.authenticationManager
 
     @Bean
     fun filterChain(http: HttpSecurity): SecurityFilterChain {
         http
+            // Disable CSRF protection, as we are using stateless JWTs, not sessions.
             .csrf { it.disable() }
+            // Set session management to stateless; the server won't create or use sessions.
             .sessionManagement { session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            // Define authorization rules for HTTP requests.
             .authorizeHttpRequests { auth ->
                 auth
-                    .requestMatchers("/api/auth/**").permitAll()
-                    .requestMatchers(
-                        "/v3/api-docs/**",
-                        "/swagger-ui/**",
-                        "/swagger-ui.html"
-                    ).permitAll()
+                    // Allow all requests to authentication endpoints and Swagger UI to be public.
+                    .requestMatchers("/api/auth/**", "/v3/api-docs/**", "/swagger-ui/**").permitAll()
+                    // All other requests must be authenticated.
                     .anyRequest().authenticated()
             }
 
         http.authenticationProvider(authenticationProvider())
-        // Use the injected authTokenFilter instance
+        // Add our custom JWT filter to be executed before the standard username/password filter.
         http.addFilterBefore(authTokenFilter, UsernamePasswordAuthenticationFilter::class.java)
 
         return http.build()

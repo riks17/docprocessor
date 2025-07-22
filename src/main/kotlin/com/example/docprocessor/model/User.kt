@@ -2,10 +2,7 @@ package com.example.docprocessor.model
 
 import jakarta.persistence.*
 
-/**
- * The single, authoritative source for user roles in the application.
- * These are the clean names that will be stored in the database.
- */
+// Represents the role of a user in the system.
 enum class Role {
     USER,
     ADMIN,

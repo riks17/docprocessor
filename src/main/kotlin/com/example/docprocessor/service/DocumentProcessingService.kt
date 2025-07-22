@@ -2,7 +2,7 @@ package com.example.docprocessor.service
 
 import com.example.docprocessor.model.*
 import com.example.docprocessor.repository.*
-import com.example.docprocessor.service.client.OcrServiceClient // Import the new Feign client
+import com.example.docprocessor.service.client.OcrServiceClient
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.PDFRenderer
 import org.slf4j.LoggerFactory
@@ -22,9 +22,11 @@ import java.time.format.DateTimeFormatter
 import java.util.*
 import javax.imageio.ImageIO
 
+// The core service responsible for the entire document processing workflow.
+// It acts as an orchestrator, handling file storage, PDF conversion,
+// communication with the external OCR service, and database persistence.
 @Service
 class DocumentProcessingService(
-    // The WebClient is replaced by the declarative Feign Client
     private val ocrServiceClient: OcrServiceClient,
     private val panDataRepository: PanDataRepository,
     private val voterIdDataRepository: VoterIdDataRepository,
@@ -53,41 +55,41 @@ class DocumentProcessingService(
         val processingTimestamp = LocalDateTime.now()
 
         try {
+            // Step 1: Stage the uploaded file to a temporary location for safe processing.
             val (stagedFile, uniqueFilename) = storeFileToTemp(multipartFile)
             tempStagedFile = stagedFile
             var fileToProcess: File = tempStagedFile
 
+            // Step 2: If the file is a PDF, convert it to an image for the OCR service.
             if (isPdf(multipartFile, tempStagedFile)) {
-                logger.info("PDF file detected: ${tempStagedFile.name}. Converting to image.")
+                logger.info("PDF file detected. Converting to image for OCR.")
                 convertedImageFile = convertPdfToImage(tempStagedFile)
                 fileToProcess = convertedImageFile
             }
 
-            // --- REFACTORED PART: Using the Feign Client ---
-            // The verbose WebClient logic is replaced by a simple, clean method call.
+            // Step 3: Call the external Python OCR service using the declarative Feign client.
             val multipartFileAdapter = FileToMultipartFileAdapter(fileToProcess)
             val pythonResponse = ocrServiceClient.processDocument(multipartFileAdapter)
-
             val ocrResult = pythonResponse.results.firstOrNull()
                 ?: throw IllegalStateException("OCR service returned an empty result list.")
 
+            // Step 4: Validate the response from the OCR service.
             if (ocrResult.ocrResults == null || ocrResult.message != null || ocrResult.error != null) {
                 val errorMessage = ocrResult.message ?: ocrResult.error ?: "Unknown error from OCR service"
                 throw IllegalStateException("OCR processing failed: $errorMessage")
             }
 
+            // Step 5: After a successful OCR, move the original file to permanent, organized storage.
             val fieldsMap = ocrResult.ocrResults
             val docType = mapPythonDocTypeToEnum(ocrResult.documentType)
-
             if (docType == DocumentType.UNKNOWN) {
                 throw IllegalArgumentException("Unsupported document type received: ${ocrResult.documentType}")
             }
-
             val finalRelativePath = moveFileToFinal(tempStagedFile, docType, processingTimestamp, uniqueFilename)
-            tempStagedFile = null
+            tempStagedFile = null // Mark as moved so it's not deleted in the `finally` block.
 
+            // Step 6: Save the extracted data to the appropriate database table.
             val storedFilePathForDb = finalRelativePath.toString().replace(File.separatorChar, '/')
-
             val result = saveData(docType, fieldsMap, storedFilePathForDb, username, processingTimestamp)
             logDocument(username, uniqueFilename, docType, DocumentStatus.VERIFIED)
             return result
@@ -95,8 +97,9 @@ class DocumentProcessingService(
         } catch (e: Exception) {
             logger.error("Document processing failed for user '$username': ${e.message}", e)
             logDocument(username, multipartFile.originalFilename ?: "unknown", DocumentType.UNKNOWN, DocumentStatus.REJECTED, e.message)
-            throw e
+            throw e // Re-throw to be caught by the GlobalExceptionHandler
         } finally {
+            // Step 7: Always clean up any temporary files that were created during the process.
             convertedImageFile?.delete()
             tempStagedFile?.delete()
             logger.info("Cleanup of temporary files complete for user '$username'.")
@@ -120,8 +123,6 @@ class DocumentProcessingService(
             DocumentType.UNKNOWN -> throw IllegalStateException("Should not attempt to save UNKNOWN document type.")
         }
     }
-
-    // --- All other private helper methods remain the same ---
 
     fun getPanDataById(id: Long): PanData? = panDataRepository.findById(id).orElse(null)
     fun getVoterIdDataById(id: Long): VoterIdData? = voterIdDataRepository.findById(id).orElse(null)
@@ -181,7 +182,7 @@ class DocumentProcessingService(
             else -> DocumentType.UNKNOWN
         }
 
-    // --- Private Helper Class to adapt a File to a MultipartFile ---
+    // A private helper class to adapt a standard File to a MultipartFile for the Feign client.
     private class FileToMultipartFileAdapter(private val file: File) : MultipartFile {
         override fun getName(): String = "files"
         override fun getOriginalFilename(): String = file.name

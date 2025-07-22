@@ -9,6 +9,9 @@ import org.springframework.boot.CommandLineRunner
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Component
 
+// A bootstrap component that runs on application startup.
+// Its purpose is to ensure that at least one SUPERADMIN user exists,
+// preventing the system from being locked out.
 @Component
 class SuperAdminInitializer(
     private val userRepository: UserRepository,
@@ -19,10 +22,6 @@ class SuperAdminInitializer(
 
     private val logger = LoggerFactory.getLogger(SuperAdminInitializer::class.java)
 
-    /**
-     * This method runs once the application context is loaded.
-     * It checks if a SuperAdmin exists and creates one if it doesn't.
-     */
     override fun run(vararg args: String?) {
         if (userRepository.findFirstByRole(Role.SUPERADMIN).isEmpty) {
             logger.info("No SuperAdmin account found. Creating a default SuperAdmin user.")
@@ -34,12 +33,11 @@ class SuperAdminInitializer(
             )
             userRepository.save(superAdmin)
 
-            // Log the credentials in a highly visible way
             logger.warn("=================================================================")
             logger.warn("  >>> Default SuperAdmin Account Created <<<")
             logger.warn("  Username: $superAdminUsername")
             logger.warn("  Password: $superAdminPassword")
-            logger.warn("  Please change this password immediately in a production environment.")
+            logger.warn("  This is for development purposes. Please use a secure password in production.")
             logger.warn("=================================================================")
         } else {
             logger.info("SuperAdmin account already exists. Skipping creation.")

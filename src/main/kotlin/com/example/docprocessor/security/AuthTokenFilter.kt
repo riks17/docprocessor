@@ -12,9 +12,9 @@ import org.springframework.stereotype.Component
 import org.springframework.util.StringUtils
 import org.springframework.web.filter.OncePerRequestFilter
 
-// Add @Component to make it a Spring-managed bean
+// This filter runs once for every incoming request to the application.
+// Its job is to inspect for a JWT token and set up the user's authentication context.
 @Component
-// Use constructor injection - this is the modern, safe way
 class AuthTokenFilter(
     private val jwtUtils: JwtUtils,
     private val userDetailsService: UserDetailsServiceImpl
@@ -39,11 +39,14 @@ class AuthTokenFilter(
                     userDetails, null, userDetails.authorities
                 )
                 authentication.details = WebAuthenticationDetailsSource().buildDetails(request)
+
+                // Set the current user's authentication in the security context.
                 SecurityContextHolder.getContext().authentication = authentication
             }
         } catch (e: Exception) {
             LOGGER.error("Cannot set user authentication: {}", e)
         }
+        // Continue the filter chain.
         filterChain.doFilter(request, response)
     }
 

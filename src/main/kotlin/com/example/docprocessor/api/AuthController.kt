@@ -27,7 +27,7 @@ class AuthController(
     private val userService: UserService
 ) {
 
-    // ... (login method is fine) ...
+    // Authenticates a user and returns a JWT token upon success.
     @PostMapping("/login")
     fun authenticateUser(@Valid @RequestBody loginRequest: LoginRequest): ResponseEntity<*> {
         val authentication = authenticationManager.authenticate(
@@ -43,11 +43,10 @@ class AuthController(
         )
     }
 
-
+    // Public endpoint for new users to register.
+    // For security, all users signing up via this endpoint are assigned the default 'USER' role.
     @PostMapping("/signup")
     fun registerUser(@Valid @RequestBody signupRequest: SignupRequest): ResponseEntity<*> {
-        // --- THE FIX ---
-        // Instead of .isPresent, we use the repository's existsBy... method, which is cleaner.
         if (userRepository.existsByUsername(signupRequest.username)) {
             return ResponseEntity.badRequest().body(MessageResponse("Error: Username is already taken!"))
         }
@@ -61,6 +60,8 @@ class AuthController(
         return ResponseEntity.ok(MessageResponse("User registered successfully!"))
     }
 
+    // Secured endpoint for creating users with specific roles.
+    // This can only be accessed by a logged-in SUPERADMIN.
     @PostMapping("/create-user")
     @PreAuthorize("hasAnyRole('SUPERADMIN')")
     fun createPrivilegedUser(@Valid @RequestBody request: PrivilegedUserCreateRequest): ResponseEntity<*> {

@@ -1,34 +1,25 @@
 package com.example.docprocessor.dto
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import org.springframework.web.multipart.MultipartFile
 
-/**
- * DTO that exactly matches the root JSON object from the Python FastAPI service.
- * e.g., {"results": [...]}
- */
+// Models the root JSON object received from the Python OCR service.
 data class PythonOcrResponse(
     val results: List<PythonOcrResult>
 )
 
-/**
- * DTO that matches each object inside the "results" list.
- */
+// Models a single result object within the Python OCR response list.
 data class PythonOcrResult(
     val filename: String,
     @JsonProperty("document_type")
     val documentType: String,
     @JsonProperty("ocr_results")
-    val ocrResults: Map<String, String>? = null, // Can be null in case of error
+    val ocrResults: Map<String, String>? = null, // Can be null in case of an error
     val message: String? = null,
     val error: String? = null
 )
 
-/**
- * Represents the final, structured response sent from our Spring Boot API
- * back to the original client (e.g., a web or mobile front-end) after a
- * successful document upload and processing.
- */
+// A generic DTO for a successful document processing response.
+// Note: The actual saved entity is returned by the service, this is a potential alternative.
 data class DocumentProcessingResult(
     val documentId: Long,
     val documentType: String,

@@ -16,15 +16,16 @@ import org.springframework.web.multipart.MultipartFile
 @CrossOrigin(origins = ["*"], maxAge = 3600)
 @RestController
 @RequestMapping("/api/documents")
+@SecurityRequirement(name = "bearerAuth") // Applies the lock icon to all endpoints in this controller
 class DocumentController(
     private val documentProcessingService: DocumentProcessingService
 ) {
     private val logger = LoggerFactory.getLogger(DocumentController::class.java)
 
+    // Accepts a single document file for OCR processing and storage.
     @PostMapping("/upload", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
     @PreAuthorize("hasAnyRole('USER', 'ADMIN', 'SUPERADMIN')")
     @Operation(summary = "Upload and process a single document")
-    @SecurityRequirement(name = "bearerAuth")
     fun uploadAndProcessDocument(
         @RequestPart("file") file: MultipartFile,
         @AuthenticationPrincipal userDetails: UserDetails
@@ -43,11 +44,11 @@ class DocumentController(
         }
     }
 
-    // ✅ NEW IMPLEMENTATION: Following the reference logic exactly.
+    // Accepts multiple document files for batch processing.
+    // Each file is processed individually, and a summary of results is returned.
     @PostMapping("/upload-bulk", consumes = [MediaType.MULTIPART_FORM_DATA_VALUE])
     @PreAuthorize("hasAnyRole('USER', 'ADMIN', 'SUPERADMIN')")
     @Operation(summary = "Upload and process multiple documents in bulk")
-    @SecurityRequirement(name = "bearerAuth")
     fun uploadAndProcessDocumentsBulk(
         // ✅ CORRECTED: Using @RequestPart for the list of files. This is the key fix.
         @RequestPart("files") files: List<MultipartFile>,
@@ -102,6 +103,8 @@ class DocumentController(
     }
 
 
+    // Retrieves processed PAN card data by its database ID.
+    // Accessible only by Admin and SuperAdmin roles.
     @GetMapping("/pan/{id}")
     @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
     @Operation(summary = "Get PAN card data by ID", security = [SecurityRequirement(name = "bearerAuth")])
@@ -115,6 +118,8 @@ class DocumentController(
         }
     }
 
+    // Retrieves processed Voter ID data by its database ID.
+    // Accessible only by Admin and SuperAdmin roles.
     @GetMapping("/voter-id/{id}")
     @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
     @Operation(summary = "Get Voter ID data by ID", security = [SecurityRequirement(name = "bearerAuth")])
@@ -128,6 +133,8 @@ class DocumentController(
         }
     }
 
+    // Retrieves processed Passport data by its database ID.
+    // Accessible only by Admin and SuperAdmin roles.
     @GetMapping("/passport/{id}")
     @PreAuthorize("hasAnyRole('ADMIN', 'SUPERADMIN')")
     @Operation(summary = "Get Passport data by ID", security = [SecurityRequirement(name = "bearerAuth")])
